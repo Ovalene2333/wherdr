@@ -1,7 +1,40 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createTranscripts } from '../server/utils/transcripts'
+import { createCodexDaemonHistory } from '../server/utils/codexDaemon'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 describe('Codex shared-daemon conversation history', () => {
+  it('still displays JSONL history when daemon lookup or history reads fail', async () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'codex-fallback-'))
+    const date = new Date()
+    const dir = path.join(home, '.codex/sessions', String(date.getFullYear()), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0'))
+    const thread = { id: 'thread-a', name: 'A task', cwd: '/work/demo', historyMode: 'paginated' }
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'rollout-test-thread-a.jsonl'), [
+      { type: 'session_meta', payload: { id: thread.id, cwd: thread.cwd, timestamp: date.toISOString(), thread_source: 'user' } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The existing JSONL reply.' }] } },
+    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+    try {
+      for (const scenario of ['missing', 'duplicate', 'status', 'explicit', 'cwd', 'unsupported', 'timeout']) {
+        const daemon = createCodexDaemonHistory({ rpc: async method => {
+          if (scenario === 'timeout' || scenario === 'explicit') throw new Error('Daemon read failed')
+          if (method === 'thread/read') return { thread }
+          if (method === 'thread/list') return { data: scenario === 'missing' ? [] : scenario === 'duplicate' ? [thread, { ...thread, id: 'thread-b' }] : [thread] }
+          throw new Error('Unknown method: thread/items/list')
+        } })
+        const reader = createTranscripts({ home, herdr: vi.fn().mockResolvedValue({}), codexHistory: daemon })
+        const reply = await reader.chat({
+          id: 'w1:p1', agent: 'codex', cwd: scenario === 'cwd' ? '/work/demo/src' : thread.cwd,
+          title: scenario === 'status' ? '⠋ A task | demo' : 'A task | demo',
+          ...(['explicit', 'cwd', 'unsupported'].includes(scenario) ? { agentSession: thread.id } : {}),
+        })
+        expect(reply.available, scenario).toBe(true)
+        expect(reply.items, scenario).toMatchObject([{ role: 'assistant', text: 'The existing JSONL reply.', ts: null }])
+      }
+    } finally { rmSync(home, { recursive: true, force: true }) }
+  })
   it('reads paginated history without a JSONL file or inherited Herdr hook context', async () => {
     const daemon = {
       chat: vi.fn().mockResolvedValue({

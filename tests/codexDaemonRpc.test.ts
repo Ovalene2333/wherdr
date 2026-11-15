@@ -8,7 +8,7 @@ import { createCodexDaemonRpc } from '../server/utils/codexDaemonRpc'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
-async function fakeDaemon() {
+async function fakeDaemon(sendRequest = false) {
   const home = mkdtempSync(path.join(os.tmpdir(), 'codex-history-'))
   const socket = path.join(home, 'app-server-control', 'app-server-control.sock')
   mkdirSync(path.dirname(socket))
@@ -19,6 +19,7 @@ async function fakeDaemon() {
   ws.on('connection', client => client.on('message', bytes => {
     const message = JSON.parse(bytes.toString())
     methods.push(message.method)
+    if (sendRequest && message.id !== undefined) client.send(JSON.stringify({ id: message.id, method: 'server/request', params: {}, result: { data: ['wrong'] } }))
     if (message.id !== undefined) client.send(JSON.stringify({ id: message.id, result: message.method === 'initialize' ? {} : { data: [], nextCursor: null } }))
   }))
   await new Promise<void>(resolve => server.listen(socket, resolve))
@@ -31,6 +32,10 @@ async function fakeDaemon() {
   return { home, methods }
 }
 describe('read-only local Codex daemon transport', () => {
+  it('ignores server requests whose ids overlap pending reads', async () => {
+    const { home } = await fakeDaemon(true)
+    expect(await createCodexDaemonRpc(home)('thread/list', {})).toEqual({ data: [], nextCursor: null })
+  })
   it('handshakes once before concurrent history requests over the UNIX WebSocket', async () => {
     const { home, methods } = await fakeDaemon()
     const rpc = createCodexDaemonRpc(home)

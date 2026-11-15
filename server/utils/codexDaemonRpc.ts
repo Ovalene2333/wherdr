@@ -48,8 +48,9 @@ export function createCodexDaemonRpc(codexHome: string): CodexRpc {
       ws.on('error', () => { if (socket === ws) fail() })
       ws.on('close', () => { if (socket === ws) fail() })
       ws.on('message', bytes => {
-        let message: { id?: number, result?: unknown, error?: { message?: string } }
+        let message: { id?: number, method?: string, result?: unknown, error?: { message?: string } }
         try { message = JSON.parse(bytes.toString()) } catch { return }
+        if (!message || typeof message !== 'object' || 'method' in message) return
         const call = message.id === undefined ? undefined : pending.get(message.id)
         if (!call) return
         if (message.error) call.reject(new Error(message.error.message || 'Codex history read failed'))

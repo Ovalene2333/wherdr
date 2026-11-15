@@ -331,6 +331,8 @@ export interface ChatResponse {
   // The transcript was rewritten above the client's cursor (same size or
   // shorter): the reply is a fresh bottom, the client starts again from it.
   rewritten?: boolean
+  // A daemon cursor expired: discard the old paging state and read a fresh tail.
+  reload?: boolean
   queue?: ClaudeQueueEntry[]
   // Claude: entries of the most recent window pulled back out of its queue
   // into the input field and not queued again (see server/utils/queued.ts checkSent).

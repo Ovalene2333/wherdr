@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto'
 import type { ChatItem, ChatResponse } from '../../shared/types'
 import type { TranscriptPane } from './transcripts'
 import type { CodexRpc } from './codexDaemonRpc'
+import { codexModelLabel } from './models'
+import { clip, isNoise } from './transcriptText'
 
 interface Thread {
   id: string
@@ -30,7 +32,6 @@ interface Cursor { thread: string, cursor: string, anchor: string | undefined }
 const replyKeys = new WeakMap<ChatItem, string>()
 export const codexDaemonReplyKey = (item: ChatItem) => replyKeys.get(item)
 const clean = (value: string | null | undefined) => (value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim()
-const clip = (value: string | undefined, limit = 20000) => (value || '').slice(0, limit)
 
 export function codexPaneName(pane: TranscriptPane) {
   const title = clean(pane.title)
@@ -46,13 +47,13 @@ export function codexHistoryItems(entries: Entry[]): ChatItem[] {
     const ts = time != null && Number.isFinite(time) ? new Date(time).toISOString() : null
     if (item.type === 'userMessage') {
       const text = (item.content || []).filter(p => p.type === 'text').map(p => p.text || '').join('\n').trim()
-      if (text && !/^\s*<(?!command-name)[a-z_-]+[\s>]/i.test(text)) result.push({ role: 'user', text: clip(text), ts })
+      if (text && !isNoise(text)) result.push({ role: 'user', text: clip(text), ts })
     } else if (item.type === 'agentMessage' && item.text?.trim()) {
       const reply: ChatItem = { role: 'assistant', text: clip(item.text), ts }
       replyKeys.set(reply, `codex-daemon:${item.id}`)
       result.push(reply)
     } else if (item.type === 'commandExecution') {
-      result.push({ role: 'tool', name: 'shell', text: clip(item.command, 300), ts, error: item.exitCode != null && item.exitCode !== 0 })
+      result.push({ role: 'tool', name: 'shell', text: clip(item.command || '', 300), ts, error: item.exitCode != null && item.exitCode !== 0 })
     } else if (item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') {
       result.push({ role: 'tool', name: item.tool || 'tool', text: clip(JSON.stringify(item.arguments ?? {}), 300), ts, error: Boolean(item.error) || item.success === false })
     } else if (item.type === 'fileChange') {
@@ -111,21 +112,19 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
     }
     return id
   }
-  async function chat(pane: TranscriptPane, options: Options = {}): Promise<ChatResponse | null> {
+  async function readChat(pane: TranscriptPane, options: Options): Promise<ChatResponse | null> {
     options.signal?.throwIfAborted()
-    let thread: Thread | null | undefined
-    try { thread = await resolve(pane) }
-    catch (error) {
-      // A machine with no shared daemon keeps the existing JSONL reader.
-      if (['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code || '')) return null
-      throw error
+    const thread = await resolve(pane)
+    options.signal?.throwIfAborted()
+    // No unique match is not evidence that the existing JSONL reader has none.
+    if (!thread || thread.historyMode !== 'paginated') return null
+    const file = `codex-daemon-${thread.id}.jsonl`
+    const base = {
+      available: true, file, session: thread.id, guessed: !pane.agentSession,
+      model: thread.model ? { id: thread.model, label: codexModelLabel(thread.model), effort: thread.reasoningEffort } : undefined,
     }
-    options.signal?.throwIfAborted()
-    if (thread === undefined) return null
-    if (!thread) return { available: false, reason: 'not_found' }
-    if (thread.historyMode !== 'paginated') return null
     const before = options.before == null ? null : cursors.get(options.before)
-    if (options.before != null && (!before || before.thread !== thread.id)) throw new Error('History cursor expired; reload this conversation')
+    if (options.before != null && (!before || before.thread !== thread.id)) return { ...base, reload: true }
     const from = options.from == null ? null : cursors.get(options.from)
     const anchor = from?.thread === thread.id ? from.anchor : null
     let cursor = before?.cursor ?? null
@@ -137,7 +136,7 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
       nextCursor = page.nextCursor || null
       cursor = nextCursor
       if (!anchor || entries.some(e => e.item.id === anchor) || !nextCursor) break
-      if (pageNumber >= 19) throw new Error('Conversation advanced beyond this page; reload it')
+      if (pageNumber >= 19) return { ...base, reload: true }
     }
     entries.reverse()
     const at = anchor ? entries.findIndex(e => e.item.id === anchor) : -1
@@ -145,15 +144,21 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
     const items = codexHistoryItems(entries)
     const start = at >= 0 ? options.from! : remember(thread.id, nextCursor, entries[0]?.item.id)
     const digest = createHash('sha256').update(JSON.stringify(items)).digest('hex').slice(0, 24)
-    const file = `codex-daemon-${thread.id}.jsonl`
-    const base = { available: true, file, session: thread.id, guessed: !pane.agentSession }
     if (options.before != null) return { ...base, older: true, items, start }
     const token = `${file}:${start}:${digest}`
     if (options.since === token) return { ...base, unchanged: true, token }
     return {
       ...base, token, items, start, queue: [],
-      model: thread.model ? { id: thread.model, label: thread.model, effort: thread.reasoningEffort } : null,
       rewritten: options.from != null && options.from !== start,
+    }
+  }
+  async function chat(pane: TranscriptPane, options: Options = {}): Promise<ChatResponse | null> {
+    try { return await readChat(pane, options) }
+    catch {
+      // The daemon is optional: stale IDs, older protocols and failed reads
+      // must not prevent locate() from finding an existing JSONL conversation.
+      options.signal?.throwIfAborted()
+      return null
     }
   }
   return { chat }

@@ -136,6 +136,30 @@ describe('re-read that keeps the current blocks', () => {
     vi.unstubAllGlobals()
   })
 
+  it('reloads an expired history cursor and can load earlier messages again', async () => {
+    let expired = false
+    reply = q => {
+      if (q.before && !expired) {
+        expired = true
+        return { available: true, file: FILE, reload: true }
+      }
+      if (q.before) return { available: true, file: FILE, older: true, start: 0, items: [{ role: 'user', text: 'The earlier question.', ts: null }] }
+      return { available: true, file: FILE, token: expired ? 'fresh-tail' : 'old-tail', start: expired ? 8 : 10, items: structuredClone(ITEMS) }
+    }
+    const w = await mount()
+    try {
+      const older = () => w.findAll('button').find(b => b.text().includes('Load earlier messages'))!
+      await older().trigger('click')
+      await expect.poll(() => view(w).chat.token).toBe('fresh-tail')
+      expect(asks.some(q => q.before === '10')).toBe(true)
+      await expect.poll(() => older().attributes('disabled')).toBeUndefined()
+      await older().trigger('click')
+      await expect.poll(() => w.find('.chat').text()).toContain('The earlier question.')
+      expect(asks.some(q => q.before === '8')).toBe(true)
+      expect(w.find('.chat').text()).toContain('keeps')
+    } finally { w.unmount() }
+  })
+
   it('an equal answer keeps tail, items, blocks and nodes, and only the token advances', async () => {
     let token = 'tok-1'
     reply = () => ({ available: true, file: FILE, token, start: 0, items: structuredClone(ITEMS) })

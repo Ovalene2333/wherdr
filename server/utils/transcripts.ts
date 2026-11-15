@@ -14,6 +14,7 @@ import { type CommandTemplate, ompCommandTemplates } from './slash'
 import { fmt } from '../../shared/message'
 import { pastedBlocks } from '../../shared/pastedText'
 import { createActivity } from '../../shared/integrations'
+import { clip, isNoise } from './transcriptText'
 
 // Backward reading by windows until there are enough messages: Claude's
 // transcripts embed images in base64, a few screenshots
@@ -22,7 +23,6 @@ const WINDOW_BYTES = 2 * 1024 * 1024
 const MAX_READ_BYTES = 24 * 1024 * 1024 // per request
 const PAGE_ITEMS = 120
 const PREVIEW_BYTES = 256 * 1024 // card previews read this much first (latestReply)
-const MAX_TEXT = 20000
 
 export interface TranscriptPane {
   id: string
@@ -87,7 +87,6 @@ type HerdrCall = (method: string, params?: Record<string, unknown>, timeoutMs?: 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any
 
-const clip = (s: string, n = MAX_TEXT) => (s.length > n ? s.slice(0, n) + '…' : s)
 // Keep notification identities server-side. Absolute line offsets survive a
 // moving tail window; lengths and text can change while a reply streams.
 const replyKeys = new WeakMap<ChatItem, string>()
@@ -97,9 +96,6 @@ function replyItem(item: ChatItem, ref: string | undefined, block = 0): ChatItem
 }
 const firstLine = (s: unknown) => String(s || '').split('\n').find(l => l.trim()) || ''
 
-// "Technical" messages injected into the thread (system reminders, outputs of
-// local commands…): not real user messages.
-const isNoise = (t: string) => /^\s*<(?!command-name)[a-z_-]+[\s>]/i.test(t) || /^\s*Caveat:/.test(t)
 // "[Image #1]" (Claude Code), "[Image #1, 756x477]" (omp).
 const stripImageTags = (t: unknown) => String(t || '').replace(/\[Image #\d+(?:, \d+x\d+)?\]\s*/g, '').trim()
 // Pasted text (a multi-line send from wherdr is one): Claude Code

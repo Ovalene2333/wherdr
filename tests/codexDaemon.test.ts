@@ -34,7 +34,7 @@ describe('Codex daemon history', () => {
   it('refuses duplicate titles, another cwd, generic titles, and subagents', async () => {
     for (const matches of [[thread, { ...thread, id: 'thread-b' }], [{ ...thread, cwd: '/other' }], [{ ...thread, parentThreadId: 'parent' }]]) {
       const { adapter, rpc } = fixture({ matches })
-      expect((await adapter.chat(pane))?.available).toBe(false)
+      expect(await adapter.chat(pane)).toBeNull()
       expect(rpc.mock.calls.some(([method]) => method === 'thread/items/list')).toBe(false)
     }
     expect(await fixture().adapter.chat({ ...pane, title: 'codex' })).toBeNull()
@@ -49,6 +49,25 @@ describe('Codex daemon history', () => {
     expect(r?.session).toBe(thread.id)
     expect(r?.guessed).toBe(false)
     expect(rpc.mock.calls[0]?.[0]).toBe('thread/read')
+  })
+  it('formats model labels and leaves missing model metadata undefined', async () => {
+    const rpc: CodexRpc = async method => method === 'thread/list'
+      ? { data: [{ ...thread, model: 'gpt-6-sol' }] }
+      : { data: [] }
+    const adapter = createCodexDaemonHistory({ rpc })
+    const first = (await adapter.chat(pane))!
+    expect(first.model?.label).toBe('GPT-6-Sol')
+    expect((await adapter.chat(pane, { since: first.token }))?.model).toEqual(first.model)
+    const noModel: CodexRpc = async method => method === 'thread/list'
+      ? { data: [{ ...thread, model: undefined }] }
+      : { data: [] }
+    expect((await createCodexDaemonHistory({ rpc: noModel }).chat(pane))?.model).toBeUndefined()
+  })
+  it('shares JSONL noise filtering and text clipping', () => {
+    const text = 'x'.repeat(20001)
+    const content = (text: string): Entry => ({ item: { id: 'item-a', type: 'userMessage', content: [{ type: 'text', text }] } })
+    expect(codexHistoryItems([content('Caveat: local command output'), content('<system-reminder>hidden</system-reminder>')])).toEqual([])
+    expect(codexHistoryItems([content(text)])[0]?.text).toBe('x'.repeat(20000) + '…')
   })
   it('keeps the tail anchor stable while new items arrive and pages older history separately', async () => {
     const { adapter, append } = fixture()
@@ -67,9 +86,9 @@ describe('Codex daemon history', () => {
     expect(next.items!.at(-1)?.text).toBe('question 150')
     expect((await adapter.chat(pane, { from: next.start, since: next.token }))?.unchanged).toBe(true)
   })
-  it('rejects an unknown cursor and an already aborted read', async () => {
+  it('requests a fresh tail for an expired cursor and rejects an already aborted read', async () => {
     const { adapter, rpc } = fixture()
-    await expect(adapter.chat(pane, { before: 1234 })).rejects.toThrow('cursor expired')
+    expect(await adapter.chat(pane, { before: 1234 })).toMatchObject({ available: true, reload: true })
     rpc.mockClear()
     await expect(adapter.chat(pane, { signal: AbortSignal.abort() })).rejects.toThrow()
     expect(rpc).not.toHaveBeenCalled()
@@ -80,13 +99,33 @@ describe('Codex daemon history', () => {
     const missing = createCodexDaemonHistory({ rpc: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } })
     expect(await missing.chat(pane)).toBeNull()
   })
-  it('propagates failures instead of replacing an existing conversation with an empty result', async () => {
+  it('falls back on daemon errors with and without an explicit session', async () => {
     const adapter = createCodexDaemonHistory({ rpc: async () => { throw new Error('connection lost') } })
-    await expect(adapter.chat(pane)).rejects.toThrow('connection lost')
+    expect(await adapter.chat(pane)).toBeNull()
+    expect(await adapter.chat({ ...pane, agentSession: thread.id })).toBeNull()
+  })
+  it('falls back on unsupported items/list and explicit session cwd mismatches', async () => {
+    for (const cwd of [pane.cwd, `${pane.cwd}/src`]) {
+      const rpc = vi.fn<CodexRpc>(async method => {
+        if (method === 'thread/read') return { thread }
+        throw new Error('Unknown method: thread/items/list')
+      })
+      expect(await createCodexDaemonHistory({ rpc }).chat({ ...pane, cwd, agentSession: thread.id })).toBeNull()
+    }
+  })
+  it('falls back for unmatched, unnamed, and status-prefixed titles', async () => {
+    for (const title of ['Another task | demo', '', '⠋ A task | demo']) {
+      expect(await fixture().adapter.chat({ ...pane, title })).toBeNull()
+    }
+  })
+  it('does not swallow cancellation during daemon reads', async () => {
+    const stop = new AbortController()
+    const rpc: CodexRpc = async () => { stop.abort(new Error('cancelled')); throw stop.signal.reason }
+    await expect(createCodexDaemonHistory({ rpc }).chat(pane, { signal: stop.signal })).rejects.toThrow('cancelled')
   })
   it('does not choose from an incomplete thread inventory', async () => {
     const rpc = vi.fn<CodexRpc>(async () => ({ data: Array.from({ length: 100 }, () => thread), nextCursor: 'more' }))
-    expect((await createCodexDaemonHistory({ rpc }).chat(pane))?.available).toBe(false)
+    expect(await createCodexDaemonHistory({ rpc }).chat(pane)).toBeNull()
     expect(rpc).toHaveBeenCalledTimes(10)
   })
 })
