@@ -39,6 +39,10 @@ describe('Codex daemon history', () => {
     }
     expect(await fixture().adapter.chat({ ...pane, title: 'codex' })).toBeNull()
   })
+  it('preserves letters and digits when comparing names and strips only controls', async () => {
+    const { adapter } = fixture({ matches: [{ ...thread, name: 'task1' }, { ...thread, id: 'thread-b', name: 'task2' }] })
+    expect((await adapter.chat({ ...pane, title: '\u0000task1 | demo\u007f' }))?.session).toBe('thread-a')
+  })
   it('uses an explicit session ID even after the title changes', async () => {
     const { adapter, rpc } = fixture({ total: 2 })
     const r = await adapter.chat({ ...pane, agentSession: thread.id, title: 'Renamed' })
