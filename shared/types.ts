@@ -322,6 +322,10 @@ export interface ChatResponse {
   token?: string
   unchanged?: boolean
   older?: boolean
+  // Absent for JSONL byte offsets; daemon pagination tokens are unordered.
+  cursorKind?: 'opaque'
+  // Temporary daemon failure: retain the current conversation and paging state.
+  stale?: boolean
   items?: ChatItem[]
   // Incremental re-read (server/utils/chatDelta.ts): the client keeps its
   // first `keep` items and `items` replace the rest. Absent: `items` is the

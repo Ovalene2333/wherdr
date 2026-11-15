@@ -12,6 +12,7 @@ test('a paginated Codex conversation is read from the shared daemon without term
   fs.mkdirSync(path.dirname(socket), { recursive: true })
   const cwd = (await fakeHerdr('e2e.pane_field', { pane_id: CODEX_UPDATE_PANE, field: 'cwd' })).value
   const methods: string[] = []
+  let unavailable = false
   const history = Array.from({ length: 250 }, (_, i) => ({
     startedAtMs: 1000 + i,
     item: i === 248
@@ -24,6 +25,10 @@ test('a paginated Codex conversation is read from the shared daemon without term
   ws.on('connection', client => client.on('message', bytes => {
     const message = JSON.parse(bytes.toString())
     methods.push(message.method)
+    if (unavailable && message.id !== undefined && message.method !== 'initialize') {
+      client.send(JSON.stringify({ id: message.id, error: { message: 'Temporary daemon read failure' } }))
+      return
+    }
     let result: object = {}
     if (message.method === 'thread/read') result = { thread: {
       id: CODEX_UPDATE_SESSION, name: 'Build review', cwd,
@@ -52,6 +57,16 @@ test('a paginated Codex conversation is read from the shared daemon without term
     await page.locator('.chat').evaluate(el => el.scrollTo({ top: 0 }))
     await expect(page.locator('.chat').getByText('History message 0.', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Load earlier messages' })).toHaveCount(0)
+    const url = `/api/chat?pane=${encodeURIComponent(CODEX_UPDATE_PANE)}`
+    const current = await (await page.request.get(url)).json()
+    const query = new URLSearchParams({ since: current.token, from: String(current.start) })
+    unavailable = true
+    const stale = await (await page.request.get(`${url}&${query}`)).json()
+    expect(stale).toMatchObject({ available: true, file: current.file, stale: true, unchanged: true })
+    await expect(page.locator('.chat').getByText('History message 0.', { exact: true })).toBeVisible()
+    unavailable = false
+    const recovered = await (await page.request.get(`${url}&${query}`)).json()
+    expect(recovered).toMatchObject({ file: current.file, unchanged: true })
     const after = await fakeHerdr('e2e.terminal_screen', { pane_id: CODEX_UPDATE_PANE })
     expect(after.keys).toEqual(before.keys)
     expect(methods).toContain('thread/items/list')

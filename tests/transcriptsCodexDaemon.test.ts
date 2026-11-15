@@ -33,6 +33,18 @@ describe('Codex shared-daemon conversation history', () => {
         expect(reply.available, scenario).toBe(true)
         expect(reply.items, scenario).toMatchObject([{ role: 'assistant', text: 'The existing JSONL reply.', ts: null }])
       }
+      let offline = false
+      const daemon = createCodexDaemonHistory({ rpc: async method => {
+        if (offline) throw new Error('Temporary daemon failure')
+        if (method === 'thread/read') return { thread }
+        return { data: [{ item: { id: 'reply-a', type: 'agentMessage', text: 'The current daemon reply.' } }] }
+      } })
+      const reader = createTranscripts({ home, herdr: vi.fn().mockResolvedValue({}), codexHistory: daemon })
+      const pane = { id: 'w2:p1', agent: 'codex', cwd: thread.cwd, agentSession: thread.id }
+      const first = await reader.chat(pane)
+      expect(first.items?.[0]?.text).toBe('The current daemon reply.')
+      offline = true
+      expect(await reader.chat(pane, { since: first.token, from: first.start })).toMatchObject({ file: first.file, stale: true, unchanged: true })
     } finally { rmSync(home, { recursive: true, force: true }) }
   })
   it('reads paginated history without a JSONL file or inherited Herdr hook context', async () => {

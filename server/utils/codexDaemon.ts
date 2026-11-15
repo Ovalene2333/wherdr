@@ -29,6 +29,7 @@ interface Page<T> { data: T[], nextCursor?: string | null }
 interface Options { since?: string, from?: number | null, before?: number | null, signal?: AbortSignal }
 export interface CodexHistory { chat: (pane: TranscriptPane, options?: Options) => Promise<ChatResponse | null> }
 interface Cursor { thread: string, cursor: string, anchor: string | undefined }
+interface Pin { identity: string, bornAt?: number, thread: Thread, last: ChatResponse }
 const replyKeys = new WeakMap<ChatItem, string>()
 export const codexDaemonReplyKey = (item: ChatItem) => replyKeys.get(item)
 const clean = (value: string | null | undefined) => (value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim()
@@ -64,38 +65,38 @@ export function codexHistoryItems(entries: Entry[]): ChatItem[] {
 }
 
 export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRpc, now?: () => number }): CodexHistory {
-  const lists = new Map<string, { at: number, promise: Promise<Thread[]> }>()
+  const lists = new Map<string, { at: number, data: Thread[] }>()
+  const pins = new Map<string, Pin>()
   const cursors = new Map<number, Cursor>()
   const cursorIds = new Map<string, number>()
   // Do not reuse another reader process's numeric cursor ids after a restart.
   let sequence = randomInt(1, 2 ** 47)
-  async function threads(cwd: string) {
+  async function threads(cwd: string, signal?: AbortSignal) {
     const hit = lists.get(cwd)
-    if (hit && now() - hit.at < 2000) return hit.promise
-    const promise = (async () => {
-      let cursor: string | null = null
-      const found: Thread[] = []
-      do {
-        const page = await rpc('thread/list', { cwd, cursor, limit: 100, useStateDbOnly: true }) as Page<Thread>
-        found.push(...page.data)
-        cursor = page.nextCursor || null
-        // An incomplete inventory cannot establish uniqueness.
-        if (found.length >= 1000 && cursor) return []
-      } while (cursor)
-      return found
-    })()
+    if (hit && now() - hit.at < 2000) return hit.data
+    let cursor: string | null = null
+    const found: Thread[] = []
+    do {
+      signal?.throwIfAborted()
+      const page = await rpc('thread/list', { cwd, cursor, limit: 100, useStateDbOnly: true }, signal) as Page<Thread>
+      found.push(...page.data)
+      cursor = page.nextCursor || null
+      // An incomplete inventory cannot establish uniqueness.
+      if (found.length >= 1000 && cursor) return []
+    } while (cursor)
     if (lists.size >= 64) lists.clear()
-    lists.set(cwd, { at: now(), promise })
-    try { return await promise } catch (error) { lists.delete(cwd); throw error }
+    lists.set(cwd, { at: now(), data: found })
+    return found
   }
-  async function resolve(pane: TranscriptPane) {
-    if (pane.agentSession) {
-      const value = (await rpc('thread/read', { threadId: pane.agentSession, includeTurns: false }) as { thread: Thread }).thread
-      return value.id === pane.agentSession && value.cwd === pane.cwd ? value : null
+  async function resolve(pane: TranscriptPane, signal?: AbortSignal, pinned?: Thread) {
+    const id = pinned?.id || pane.agentSession
+    if (id) {
+      const value = (await rpc('thread/read', { threadId: id, includeTurns: false }, signal) as { thread: Thread }).thread
+      return value.id === id && value.cwd === pane.cwd ? value : null
     }
     const name = codexPaneName(pane)
     if (!name || !pane.cwd) return undefined
-    const matches = (await threads(pane.cwd)).filter(t => t.cwd === pane.cwd && !t.parentThreadId && clean(t.name) === name)
+    const matches = (await threads(pane.cwd, signal)).filter(t => t.cwd === pane.cwd && !t.parentThreadId && clean(t.name) === name)
     return matches.length === 1 ? matches[0]! : null
   }
   function remember(thread: string, cursor: string | null | undefined, anchor: string | undefined) {
@@ -113,19 +114,20 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
     }
     return id
   }
-  async function readChat(pane: TranscriptPane, options: Options): Promise<ChatResponse | null> {
+  async function readChat(pane: TranscriptPane, options: Options, pinned?: Thread): Promise<{ response: ChatResponse, thread: Thread } | null> {
     options.signal?.throwIfAborted()
-    const thread = await resolve(pane)
+    const thread = await resolve(pane, options.signal, pinned)
     options.signal?.throwIfAborted()
     // No unique match is not evidence that the existing JSONL reader has none.
     if (!thread || thread.historyMode !== 'paginated') return null
+    const done = (response: ChatResponse) => ({ response, thread })
     const file = `codex-daemon-${thread.id}.jsonl`
     const base = {
-      available: true, file, session: thread.id, guessed: !pane.agentSession,
+      available: true, file, session: thread.id, guessed: !pane.agentSession, cursorKind: 'opaque' as const,
       model: thread.model ? { id: thread.model, label: codexModelLabel(thread.model), effort: thread.reasoningEffort } : undefined,
     }
     const before = options.before == null ? null : cursors.get(options.before)
-    if (options.before != null && (!before || before.thread !== thread.id)) return { ...base, reload: true }
+    if (options.before != null && (!before || before.thread !== thread.id)) return done({ ...base, reload: true })
     const from = options.from == null ? null : cursors.get(options.from)
     const anchor = from?.thread === thread.id ? from.anchor : null
     let cursor = before?.cursor ?? null
@@ -137,7 +139,7 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
       nextCursor = page.nextCursor || null
       cursor = nextCursor
       if (!anchor || entries.some(e => e.item.id === anchor) || !nextCursor) break
-      if (pageNumber >= 19) return { ...base, reload: true }
+      if (pageNumber >= 19) return done({ ...base, reload: true })
     }
     entries.reverse()
     const at = anchor ? entries.findIndex(e => e.item.id === anchor) : -1
@@ -145,22 +147,55 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
     const items = codexHistoryItems(entries)
     const start = at >= 0 ? options.from! : remember(thread.id, nextCursor, entries[0]?.item.id)
     const digest = createHash('sha256').update(JSON.stringify(items)).digest('hex').slice(0, 24)
-    if (options.before != null) return { ...base, older: true, items, start }
+    if (options.before != null) return done({ ...base, older: true, items, start })
     const token = `${file}:${start}:${digest}`
-    if (options.since === token) return { ...base, unchanged: true, token }
-    return {
+    if (options.since === token) return done({ ...base, unchanged: true, token })
+    return done({
       ...base, token, items, start, queue: [],
       rewritten: options.from != null && options.from !== start,
-    }
+    })
   }
   async function chat(pane: TranscriptPane, options: Options = {}): Promise<ChatResponse | null> {
-    try { return await readChat(pane, options) }
-    catch {
-      // The daemon is optional: stale IDs, older protocols and failed reads
-      // must not prevent locate() from finding an existing JSONL conversation.
-      options.signal?.throwIfAborted()
-      return null
+    options.signal?.throwIfAborted()
+    // A spinner changing does not select a different thread. This only keeps
+    // an already-established binding; initial lookup still requires an exact name.
+    const name = codexPaneName(pane)?.replace(/^[\u2800-\u28ff\u25d0-\u25d3]\s*/, '')
+    const identity = JSON.stringify([pane.cwd, pane.agentSession || null, pane.agentSession ? null : name])
+    let pin = pins.get(pane.id)
+    const sameBirth = pin && (pin.bornAt == null || pane.bornAt == null || pin.bornAt === pane.bornAt)
+    const sameContext = pin && sameBirth && pane.cwd === pin.thread.cwd && (pane.agentSession
+      ? pane.agentSession === pin.thread.id
+      : !name || pin.identity === identity || name === clean(pin.thread.name))
+    if (!sameContext) { pins.delete(pane.id); pin = undefined }
+    const stale = (): ChatResponse | null => pin ? {
+      ...pin.last, stale: true,
+      // Existing readers keep their exact tail and older pages; a new reader
+      // gets the last known snapshot, including stable reply identities.
+      ...(options.from != null || options.since || options.before != null
+        ? { unchanged: true, items: undefined, token: options.since || pin.last.token } : {}),
+    } : null
+    const stop = new AbortController()
+    const timer = setTimeout(() => stop.abort(new Error('Codex history budget exceeded')), 3000)
+    const signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal
+    try {
+      const result = await readChat(pane, { ...options, since: pin ? options.since : undefined, signal }, pin?.thread)
+      if (!result) return stale()
+      const { response, thread } = result
+      if (response.items && !response.older && !response.reload) {
+        if (pins.size >= 128 && !pins.has(pane.id)) pins.delete(pins.keys().next().value!)
+        pins.set(pane.id, { identity, bornAt: pane.bornAt, thread, last: { ...response } })
+      } else if (pin && response.unchanged) {
+        pins.set(pane.id, { ...pin, thread, last: { ...pin.last, model: response.model, guessed: response.guessed } })
+      }
+      return response
     }
+    catch {
+      // Before binding, the optional daemon must not hide an existing JSONL
+      // conversation. After binding, a failed read must not switch its source.
+      options.signal?.throwIfAborted()
+      return stale()
+    }
+    finally { clearTimeout(timer) }
   }
   return { chat }
 }

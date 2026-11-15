@@ -7,7 +7,11 @@ wherdr reads the existing daemon without starting a thread or sending terminal
 input. An integration-provided session ID is preferred; otherwise the terminal
 title must match exactly one thread name in the same working directory. Repeated
 names are not guessed. A missing or ambiguous match, mismatched working directory,
-or failed daemon read falls back to the existing JSONL lookup. Expired paging cursors
+or failed initial daemon read falls back to the existing JSONL lookup. Once a pane
+has read a daemon thread, transient failures keep that source and its last known
+tail until the daemon recovers or the selected conversation changes. Daemon reads
+have a three-second overall budget, and connection failures back off for five
+seconds instead of reconnecting on every poll. Expired paging cursors
 reload the current conversation tail. Legacy JSONL histories and remote machines keep
 their existing reader. This reader currently supports text and tool summaries; daemon
 image attachments do not yet have an image endpoint.

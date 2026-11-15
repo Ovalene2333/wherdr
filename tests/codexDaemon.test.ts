@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createCodexDaemonHistory, codexHistoryItems } from '../server/utils/codexDaemon'
+import { createCodexDaemonHistory, codexDaemonReplyKey, codexHistoryItems } from '../server/utils/codexDaemon'
 import type { CodexRpc } from '../server/utils/codexDaemonRpc'
 
 const thread = { id: 'thread-a', name: 'A task', cwd: '/work/demo', historyMode: 'paginated', model: 'test-model' }
@@ -24,6 +24,52 @@ function fixture({ matches = [thread], total = 150 } = {}) {
   return { adapter: createCodexDaemonHistory({ rpc }), rpc, append: (i: number) => history.push(entry(i)) }
 }
 describe('Codex daemon history', () => {
+  it('limits the entire multi-page lookup to three seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      const rpc = vi.fn<CodexRpc>((_method, _params, signal) => new Promise((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(signal?.reason) }
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', abort)
+          resolve({ data: [thread], nextCursor: 'more' })
+        }, 1000)
+        signal?.addEventListener('abort', abort, { once: true })
+      }))
+      let finished = false
+      const read = createCodexDaemonHistory({ rpc }).chat(pane).then(result => { finished = true; return result })
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(finished).toBe(true)
+      expect(await read).toBeNull()
+      expect(rpc).toHaveBeenCalledTimes(3)
+    } finally { vi.useRealTimers() }
+  })
+  it('keeps the daemon source and tail on transient failures, then recovers without a rewrite', async () => {
+    const { adapter, rpc } = fixture()
+    const first = (await adapter.chat(pane))!
+    rpc.mockRejectedValueOnce(new Error('slow daemon'))
+    const stale = (await adapter.chat({ ...pane, title: '⠋ A task | demo' }, { since: first.token, from: first.start }))!
+    expect(stale).toMatchObject({ available: true, file: first.file, stale: true, unchanged: true })
+    const recovered = (await adapter.chat(pane, { since: first.token, from: first.start }))!
+    expect(recovered).toMatchObject({ file: first.file, unchanged: true })
+    expect(recovered.rewritten).not.toBe(true)
+    rpc.mockRejectedValueOnce(new Error('offline'))
+    const reopened = (await adapter.chat({ ...pane, title: 'codex' }))!
+    expect(reopened.items).toBe(first.items)
+    expect(codexDaemonReplyKey(reopened.items!.at(-1)!)).toBe(codexDaemonReplyKey(first.items!.at(-1)!))
+  })
+  it('does not switch a pinned pane to another matching thread and releases it on an explicit session change', async () => {
+    const { adapter, rpc } = fixture()
+    const first = (await adapter.chat(pane))!
+    rpc.mockImplementation(async () => { throw new Error('offline') })
+    expect((await adapter.chat(pane, { before: first.start }))?.stale).toBe(true)
+    expect(await adapter.chat({ ...pane, agentSession: 'another-thread' })).toBeNull()
+  })
+  it('releases a binding when Herdr reuses a pane id for a new pane', async () => {
+    const { adapter, rpc } = fixture()
+    await adapter.chat({ ...pane, bornAt: 1000 })
+    rpc.mockRejectedValue(new Error('offline'))
+    expect(await adapter.chat({ ...pane, bornAt: 2000 })).toBeNull()
+  })
   it('resolves an exact unique name and cwd without comparing pane and thread creation times', async () => {
     const { adapter } = fixture({ total: 24 })
     const r = await adapter.chat(pane)

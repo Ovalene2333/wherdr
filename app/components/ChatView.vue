@@ -369,6 +369,7 @@ async function loadOlder() {
   try {
     const r = await api<ChatResponse>(chatUrl(new URLSearchParams({ pane, before: String(before) })), undefined, AbortSignal.timeout(CHAT_READ_MS))
     if (pane !== props.pane.id || r.file !== file || chat.value.olderCursor !== before) return
+    if (r.stale) return
     if (r.reload) {
       chat.value = fresh()
       synced = false
@@ -382,8 +383,8 @@ async function loadOlder() {
       chat.value = {
         ...chat.value,
         older: (r.items || []).concat(chat.value.older),
-        // Daemon cursors are opaque tokens, not ordered byte offsets.
-        olderCursor: (r.start ?? 0) !== before ? (r.start ?? 0) : 0,
+        // Rewritten JSONL may return a later byte offset: stop, as before.
+        olderCursor: (r.cursorKind === 'opaque' ? (r.start ?? 0) !== before : (r.start ?? 0) < before) ? (r.start ?? 0) : 0,
       }
     }, true)
     saveChat(pane, items.value, chat.value.file)
