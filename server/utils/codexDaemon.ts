@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomInt } from 'node:crypto'
 import type { ChatItem, ChatResponse } from '../../shared/types'
 import type { TranscriptPane } from './transcripts'
 import type { CodexRpc } from './codexDaemonRpc'
@@ -67,7 +67,8 @@ export function createCodexDaemonHistory({ rpc, now = Date.now }: { rpc: CodexRp
   const lists = new Map<string, { at: number, promise: Promise<Thread[]> }>()
   const cursors = new Map<number, Cursor>()
   const cursorIds = new Map<string, number>()
-  let sequence = 0
+  // Do not reuse another reader process's numeric cursor ids after a restart.
+  let sequence = randomInt(1, 2 ** 47)
   async function threads(cwd: string) {
     const hit = lists.get(cwd)
     if (hit && now() - hit.at < 2000) return hit.promise

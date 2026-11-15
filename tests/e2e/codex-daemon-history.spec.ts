@@ -12,6 +12,12 @@ test('a paginated Codex conversation is read from the shared daemon without term
   fs.mkdirSync(path.dirname(socket), { recursive: true })
   const cwd = (await fakeHerdr('e2e.pane_field', { pane_id: CODEX_UPDATE_PANE, field: 'cwd' })).value
   const methods: string[] = []
+  const history = Array.from({ length: 250 }, (_, i) => ({
+    startedAtMs: 1000 + i,
+    item: i === 248
+      ? { id: `item-${i}`, type: 'userMessage', content: [{ type: 'text', text: 'Read the current history.' }] }
+      : { id: `item-${i}`, type: 'agentMessage', text: i === 249 ? 'This reply is stored in the shared daemon.' : `History message ${i}.` },
+  }))
   const server = createServer()
   const ws = new WebSocketServer({ noServer: true })
   server.on('upgrade', (request, socket, head) => ws.handleUpgrade(request, socket, head, client => ws.emit('connection', client)))
@@ -23,10 +29,11 @@ test('a paginated Codex conversation is read from the shared daemon without term
       id: CODEX_UPDATE_SESSION, name: 'Build review', cwd,
       historyMode: 'paginated', model: 'test-model',
     } }
-    if (message.method === 'thread/items/list') result = { data: [
-      { startedAtMs: 2000, item: { id: 'reply', type: 'agentMessage', text: 'This reply is stored in the shared daemon.' } },
-      { startedAtMs: 1000, item: { id: 'question', type: 'userMessage', content: [{ type: 'text', text: 'Read the current history.' }] } },
-    ], nextCursor: null }
+    if (message.method === 'thread/items/list') {
+      const end = message.params.cursor == null ? history.length : Number(message.params.cursor)
+      const start = Math.max(0, end - Number(message.params.limit))
+      result = { data: history.slice(start, end).reverse(), nextCursor: start ? String(start) : null }
+    }
     if (message.id !== undefined) client.send(JSON.stringify({ id: message.id, result }))
   }))
   await new Promise<void>(resolve => server.listen(socket, resolve))
@@ -37,6 +44,14 @@ test('a paginated Codex conversation is read from the shared daemon without term
     await expect(page.locator('.chat').getByText('This reply is stored in the shared daemon.')).toBeVisible()
     await expect(page.locator('.chat').getByText('Read the current history.')).toBeVisible()
     await expect(page.locator('.chat').getByText('No conversation for this agent yet.')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Load earlier messages' })).toBeEnabled()
+    // Scrolling to the button itself triggers infinite scroll before a click.
+    await page.locator('.chat').evaluate(el => el.scrollTo({ top: 0 }))
+    await expect(page.locator('.chat').getByText('History message 50.', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Load earlier messages' })).toBeEnabled()
+    await page.locator('.chat').evaluate(el => el.scrollTo({ top: 0 }))
+    await expect(page.locator('.chat').getByText('History message 0.', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Load earlier messages' })).toHaveCount(0)
     const after = await fakeHerdr('e2e.terminal_screen', { pane_id: CODEX_UPDATE_PANE })
     expect(after.keys).toEqual(before.keys)
     expect(methods).toContain('thread/items/list')

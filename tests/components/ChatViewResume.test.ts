@@ -160,6 +160,23 @@ describe('re-read that keeps the current blocks', () => {
     } finally { w.unmount() }
   })
 
+  it('keeps paging when opaque daemon cursor tokens increase', async () => {
+    reply = q => {
+      if (q.before === '1') return { available: true, file: FILE, older: true, start: 2, items: [{ role: 'user', text: 'The middle question.', ts: null }] }
+      if (q.before === '2') return { available: true, file: FILE, older: true, start: 0, items: [{ role: 'user', text: 'The first question.', ts: null }] }
+      return { available: true, file: FILE, token: 'opaque-tail', start: 1, items: structuredClone(ITEMS) }
+    }
+    const w = await mount()
+    try {
+      const older = () => w.findAll('button').find(b => b.text().includes('Load earlier messages'))!
+      await older().trigger('click')
+      await expect.poll(() => w.find('.chat').text()).toContain('The middle question.')
+      expect(older()).toBeDefined()
+      await older().trigger('click')
+      await expect.poll(() => w.find('.chat').text()).toContain('The first question.')
+    } finally { w.unmount() }
+  })
+
   it('an equal answer keeps tail, items, blocks and nodes, and only the token advances', async () => {
     let token = 'tok-1'
     reply = () => ({ available: true, file: FILE, token, start: 0, items: structuredClone(ITEMS) })

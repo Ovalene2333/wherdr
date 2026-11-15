@@ -382,8 +382,8 @@ async function loadOlder() {
       chat.value = {
         ...chat.value,
         older: (r.items || []).concat(chat.value.older),
-        // no progress: stop there
-        olderCursor: (r.start ?? 0) < before ? (r.start ?? 0) : 0,
+        // Daemon cursors are opaque tokens, not ordered byte offsets.
+        olderCursor: (r.start ?? 0) !== before ? (r.start ?? 0) : 0,
       }
     }, true)
     saveChat(pane, items.value, chat.value.file)

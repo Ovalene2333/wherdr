@@ -88,7 +88,7 @@ describe('Codex daemon history', () => {
   })
   it('requests a fresh tail for an expired cursor and rejects an already aborted read', async () => {
     const { adapter, rpc } = fixture()
-    expect(await adapter.chat(pane, { before: 1234 })).toMatchObject({ available: true, reload: true })
+    expect(await adapter.chat(pane, { before: 0 })).toMatchObject({ available: true, reload: true })
     rpc.mockClear()
     await expect(adapter.chat(pane, { signal: AbortSignal.abort() })).rejects.toThrow()
     expect(rpc).not.toHaveBeenCalled()
