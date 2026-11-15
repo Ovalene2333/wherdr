@@ -2,6 +2,14 @@
 
 [Documentation](README.md) · [Project](../README.md)
 
+Local Codex sessions can also use the shared app-server's paginated history.
+wherdr reads the existing daemon without starting a thread or sending terminal
+input. An integration-provided session ID is preferred; otherwise the terminal
+title must match exactly one thread name in the same working directory. Repeated
+names are not guessed. Legacy JSONL histories and remote machines keep their
+existing reader. This reader currently supports text and tool summaries; daemon
+image attachments do not yet have an image endpoint.
+
 - **Conversation view**: the agent's real transcript (Claude Code, Codex and omp), rendered as
   Markdown, with grouped tool calls, images (full-screen viewer with pinch / wheel zoom and pan), timestamps, search and infinite scroll back to the
   first message. Reading a conversation never touches the terminal, so it never resizes a pane.

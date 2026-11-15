@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { codexDaemonReplyKey, type CodexHistory } from './codexDaemon'
 import { imageTagCount } from '../../shared/queuedMatch'
 import type { ChatItem, ChatResponse, ClaudeQueueEntry, ModelInfo, PromptDetail } from '../../shared/types'
 import { ompToolCall, ompToolResult, ompUserRun } from './ompTools'
@@ -30,6 +31,7 @@ export interface TranscriptPane {
   agentSession?: string | null
   bornAt?: number
   status?: string | null
+  title?: string | null
   // A conversation the board recorded (a finished task's agent): its session
   // file only, never one guessed from a process or a folder's latest file.
   fixed?: boolean
@@ -498,7 +500,7 @@ export function claudeParser(home = '') {
   function result(): Parsed {
     const out: Parsed = items.map((it) => {
       const c = { ...it }
-      const key = replyKeys.get(it)
+      const key = replyKeys.get(it) || codexDaemonReplyKey(it)
       if (key) replyKeys.set(c, key)
       return c
     })
@@ -995,7 +997,7 @@ export function isMissing(e: unknown): boolean {
   return err.code === 'remote' && /no such file|not a directory|introuvable/i.test(err.message || '')
 }
 
-export function createTranscripts({ home, herdr, fs = localFs, now = Date.now }: { home: string, herdr: HerdrCall, fs?: MachineFs, now?: () => number }) {
+export function createTranscripts({ home, herdr, fs = localFs, now = Date.now, codexHistory }: { home: string, herdr: HerdrCall, fs?: MachineFs, now?: () => number, codexHistory?: CodexHistory }) {
   // File -> state (size, generation) and when this server first saw it, for
   // whole-second mtimes (see SETTLE_MS); `file|size|gen` -> checksum of the
   // file at first sight (null: could not be taken).
@@ -1518,6 +1520,10 @@ export function createTranscripts({ home, herdr, fs = localFs, now = Date.now }:
   // opts.signal: the request was given up (client gone): reads stop
   async function chat(pane: TranscriptPane, opts: { since?: string, from?: number | null, before?: number | null, fresh?: boolean, anchor?: string, signal?: AbortSignal } = {}): Promise<ChatResponse> {
     if (!hasTranscript(pane.agent)) return { available: false, reason: 'unsupported' }
+    if (pane.agent === 'codex' && !pane.fixed && codexHistory) {
+      const history = await codexHistory.chat(pane, opts)
+      if (history) return history
+    }
     const loc = await locate(pane, Boolean(opts.fresh))
     if (!loc) return { available: false, reason: 'not_found' }
     let st
@@ -1615,7 +1621,7 @@ export function createTranscripts({ home, herdr, fs = localFs, now = Date.now }:
       const it = items[i]!
       if (it.role === 'assistant' && it.text.trim()) {
         const text = it.text.replace(/```[\s\S]*?```/g, ' ').replace(/[#*_`>|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180)
-        const key = replyKeys.get(it)
+        const key = replyKeys.get(it) || codexDaemonReplyKey(it)
         if (key) return { key, text }
       }
     }
